@@ -1,0 +1,106 @@
+用protobuf和grpc代替ROS中的message
+
+背景
+ROS message is known having problem with backward compatibility. Anytime, when the ROS message is changed, the original collected data is not usable unless converted into the new message format. This is a huge pain in autonomous driving area because huge amount of data was recorded at runtime compared to the traditional robotic area. Protobuf is a popular protocol format, which is well designed with backward compatibility, also the data could be more compact. However, ROS community has concerns that protobuf will not handle very large message well. So, that is why we propose to support both original ROS message and protobuf natively.
+
+简单来说就是向后兼容很不友好。
+
+ROS Message 资料：http://wiki.ros.org/ROS/Tutorials/CreatingMsgAndSrv
+
+解决思路
+第一种：修改ROS底层支持protobuf，缺点是难度较大且需要修改ROS原生的工具，优势是保持上层调用接口不变性，参考百度apollo的做法
+
+第二种：利用ROS的template-based serialization system特性，直接实现通过protobuf通信的模版方法，缺点是上层调用接口需要略加修改，ROS原生工具查看不了内容了，优势是ROS提供了教程
+
+
+
+解决方案
+目前Voyager采用的是第二种思路，具体如下：
+
+1、ROS的template-based serialization机制（ROS1.1以上版本）
+参考资料：http://wiki.ros.org/roscpp/Overview/MessagesSerializationAndAdaptingTypes
+
+简单来说只要能够实现如下序列化函数，就可以在ROS中通信
+
+namespace serialization
+ {
+     template<typename T>
+     struct Serializer
+     {
+       template<typename Stream>
+       inline static void write(Stream& stream, typename boost::call_traits<T>::param_type t);
+       template<typename Stream>
+       inline static void read(Stream& stream, typename boost::call_traits<T>::reference t);
+       inline static uint32_t serializedLength(typename boost::call_traits<T>::param_type t);
+     };
+ }
+
+
+2、ROS的Message Traits
+参考资料：http://wiki.ros.org/roscpp/Overview/MessagesTraits
+
+Message Traits是指ROS中的Message具备一些查询的特征信息，因此在替换Message时，需要兼容必选的几个查询函数，具体如下：
+
+namespace message_traits
+ {
+     template<typename M>
+     struct MD5Sum
+     {
+       static const char* value();
+       static const char* value(const M& m);
+     };
+     template<typename M>
+     struct DataType
+     {
+       static const char* value();
+       static const char* value(const M& m);
+     };
+     template<typename M>
+     struct Definition
+     {
+       static const char* value();
+       static const char* value(const M& m);
+     };
+ }
+
+
+3、ROS Sub、Pub的流程
+参考资料：http://wiki.ros.org/ROS/Tutorials/WritingPublisherSubscriber%28c%2B%2B%29
+
+Pub流程：核心的就是ros:Publisher这个类，需要注意的是此处的消息是ROS原生支持的Message类型Uint32
+
+ros::init(argc, argv, "talker");
+ros::NodeHandle n;
+ros::Publisher chatter_pub = n.advertise<std_msgs::Uint32>("chatter", 1000);
+ros::Rate loop_rate(10);
+while (ros::ok())
+{
+	std_msgs::Uint32 msg = 123;
+	chatter_pub.publish(msg);
+	ros::spinOnce();
+	loop_rate.sleep();
+}
+Sub流程：核心的就是ros::Subscriber类，及callback函数，需要注意callback函数的参数是std_msgs::Uint32
+
+void chatterCallback(const std_msgs::Uint32::ConstPtr& msg)
+{
+	ROS_INFO("recv %d", msg)
+}
+ 
+ros::init(argc, argv, "listener");
+ros::NodeHandle n;
+ros::Subscriber sub = n.subscribe("chatter", 1000, chatterCallback);
+ros::spin();
+
+
+4、具体的开发内容
+
+具体的代码见
+
+主要分为几大块：
+
+protobuf定义文件
+protobuf template-based serialization 实现代码
+新的pub、sub示例代码
+新的编译CMakeLists.txt
+
